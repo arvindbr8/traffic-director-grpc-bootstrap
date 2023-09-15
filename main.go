@@ -144,7 +144,7 @@ func main() {
 			ClusterName: cluster,
 			Location:    zone,
 		}
-		meshId = fmt.Sprintf("mesh:%s", meshNamer.GenerateMeshId())
+		meshId = meshNamer.GenerateMeshId()
 	}
 	// Override meshId if configMesh is set.
 	if *configMesh != "" {
@@ -229,7 +229,7 @@ type configInput struct {
 func validate(in configInput) error {
 	re := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]{0,63}$`)
 	if in.configMesh != "" && !re.MatchString(in.configMesh) {
-		return fmt.Errorf("config-mesh may only contain letters, numbers, and '-'. It must begin with a letter and must not exceed 64 characters in length")
+		return fmt.Errorf("config-mesh may only contain letters, numbers, and '-'. It must begin with a letter and must not exceed 64 characters in length. Found '%s'", in.configMesh)
 	}
 
 	return nil
