@@ -22,12 +22,13 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"regexp"
 	"runtime/debug"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"td-grpc-bootstrap/csmnamer"
@@ -74,7 +75,7 @@ func main() {
 
 	if *gcpProjectNumber == 0 {
 		var err error
-		*gcpProjectNumber, err = getProjectId()
+		*gcpProjectNumber, err = defaultMetadataClient.getProjectNumber()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to determine project id: %s\n", err)
 			os.Exit(1)
@@ -86,10 +87,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Warning: failed to determine host's ip: %s\n", err)
 	}
 
-	// Retrieve zone from the metadata server only if not specified in args.
-	zone := *localityZone
-	if zone == "" {
-		zone, err = getZone()
+	vmZone := *localityZone
+	if vmZone == "" {
+		vmZone, err = defaultMetadataClient.getNodeZone()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
 		}
@@ -108,7 +108,7 @@ func main() {
 		case deploymentTypeGKE:
 			cluster := *gkeClusterName
 			if cluster == "" {
-				cluster, err = getClusterName()
+				cluster, err = defaultMetadataClient.getClusterName()
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
 				}
@@ -119,7 +119,7 @@ func main() {
 			}
 			deploymentInfo = map[string]string{
 				"GKE-CLUSTER":   cluster,
-				"GCP-ZONE":      zone,
+				"GCP-ZONE":      vmZone,
 				"INSTANCE-IP":   ip,
 				"GKE-POD":       pod,
 				"GKE-NAMESPACE": *gkeNamespace,
@@ -127,11 +127,14 @@ func main() {
 		case deploymentTypeGCE:
 			vmName := *gceVM
 			if vmName == "" {
-				vmName = getVMName()
+				vmName, err = defaultMetadataClient.getVMName()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: unable to determine GCE VM name: %s\n", err)
+				}
 			}
 			deploymentInfo = map[string]string{
 				"GCE-VM":      vmName,
-				"GCP-ZONE":    zone,
+				"GCP-ZONE":    vmZone,
 				"INSTANCE-IP": ip,
 			}
 		}
@@ -144,18 +147,18 @@ func main() {
 			os.Exit(1)
 		}
 
-		clusterLocality := *gkeLocation
-		if clusterLocality == "" {
-			clusterLocality, err = getClusterLocality()
+		cl := *gkeLocation
+		if cl == "" {
+			cl, err = defaultMetadataClient.getClusterLocation()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: unable to generate mesh id: %s\n", err)
 				os.Exit(1)
 			}
 		}
 
-		cluster := *gkeClusterName
-		if cluster == "" {
-			cluster, err = getClusterName()
+		cn := *gkeClusterName
+		if cn == "" {
+			cn, err = defaultMetadataClient.getClusterName()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: unable to generate mesh id: %s\n", err)
 				os.Exit(1)
@@ -163,8 +166,8 @@ func main() {
 		}
 
 		meshNamer := csmnamer.MeshNamer{
-			ClusterName: cluster,
-			Location:    clusterLocality,
+			ClusterName: cn,
+			Location:    cl,
 		}
 		meshId = meshNamer.GenerateMeshId()
 	}
@@ -180,13 +183,13 @@ func main() {
 		gcpProjectNumber:       *gcpProjectNumber,
 		vpcNetworkName:         *vpcNetworkName,
 		ip:                     ip,
-		zone:                   zone,
+		vmZone:                 vmZone,
 		ignoreResourceDeletion: *ignoreResourceDeletion,
 		secretsDir:             *secretsDir,
 		metadataLabels:         nodeMetadata,
 		deploymentInfo:         deploymentInfo,
 		configMesh:             meshId,
-		ipv6Capable:            isIPv6Capable(),
+		ipv6Capable:            defaultMetadataClient.isIPv6Capable(),
 		includeXDSTPNameInLDS:  *includeXDSTPNameInLDS,
 		gitCommitHash:          gitCommitHash,
 	}
@@ -233,7 +236,7 @@ type configInput struct {
 	gcpProjectNumber       int64
 	vpcNetworkName         string
 	ip                     string
-	zone                   string
+	vmZone                 string
 	ignoreResourceDeletion bool
 	secretsDir             string
 	metadataLabels         map[string]string
@@ -278,7 +281,7 @@ func generate(in configInput) ([]byte, error) {
 			Id:      fmt.Sprintf("projects/%d/networks/%s/nodes/%s", in.gcpProjectNumber, networkIdentifier, uuid.New().String()),
 			Cluster: "cluster", // unused by TD
 			Locality: &locality{
-				Zone: in.zone,
+				Zone: in.vmZone,
 			},
 			Metadata: map[string]interface{}{
 				"INSTANCE_IP": in.ip,
@@ -368,46 +371,6 @@ func getHostIp() (string, error) {
 	return addrs[0], nil
 }
 
-func getZone() (string, error) {
-	qualifiedZone, err := getFromMetadata("http://metadata.google.internal/computeMetadata/v1/instance/zone")
-	if err != nil {
-		return "", fmt.Errorf("failed to determine zone: could not discover instance zone: %w", err)
-	}
-	i := bytes.LastIndexByte(qualifiedZone, '/')
-	if i == -1 {
-		return "", fmt.Errorf("failed to determine zone: could not parse zone from metadata server: %s", qualifiedZone)
-	}
-	return string(qualifiedZone[i+1:]), nil
-}
-
-func getProjectId() (int64, error) {
-	projectIdBytes, err := getFromMetadata("http://metadata.google.internal/computeMetadata/v1/project/numeric-project-id")
-	if err != nil {
-		return 0, fmt.Errorf("could not discover project id: %w", err)
-	}
-	projectId, err := strconv.ParseInt(string(projectIdBytes), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("could not parse project id from metadata server: %w", err)
-	}
-	return projectId, nil
-}
-
-func getClusterName() (string, error) {
-	cluster, err := getFromMetadata("http://metadata.google.internal/computeMetadata/v1/instance/attributes/cluster-name")
-	if err != nil {
-		return "", fmt.Errorf("failed to determine GKE cluster name: %s", err)
-	}
-	return string(cluster), nil
-}
-
-func getClusterLocality() (string, error) {
-	locality, err := getFromMetadata("http://metadata.google.internal/computeMetadata/v1/instance/attributes/cluster-location")
-	if err != nil {
-		return "", fmt.Errorf("failed to determine GKE cluster locality: %s", err)
-	}
-	return string(locality), nil
-}
-
 func getPodName() string {
 	pod, err := os.Hostname()
 	if err != nil {
@@ -416,50 +379,119 @@ func getPodName() string {
 	return pod
 }
 
-func getVMName() string {
-	vm, err := getFromMetadata("http://metadata.google.internal/computeMetadata/v1/instance/name")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not discover GCE VM name: %v", err)
-		return ""
-	}
-	return string(vm)
+type metadataClient struct {
+	hc *http.Client
 }
 
-// isIPv6Capable returns true if the VM is configured with an IPv6 address.
-// This will contact the metadata server to retrieve this information.
-func isIPv6Capable() bool {
-	_, err := getFromMetadata("http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ipv6s")
+func (c *metadataClient) get(suffix string) (string, error) {
+	// Remove leading slash if present.
+	suffix = strings.TrimLeft(suffix, "/")
+
+	u := "http://metadata.google.internal/computeMetadata/v1/" + suffix
+
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+
+	res, err := c.hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed reading from metadata server: %w", err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed reading from metadata server: %w", err)
+	}
+
+	if code := res.StatusCode; code < 200 || code > 299 {
+		return "", fmt.Errorf("metadata server returned status code %d for url %q", code, u)
+	}
+	return string(body), nil
+}
+
+var (
+	projectNumberCache   = &cachedValue{k: "project/numeric-project-id"}
+	ipV6Cache            = &cachedValue{k: "instance/network-interfaces/0/ipv6s"}
+	vmNameCache          = &cachedValue{k: "instance/name"}
+	clusterNameCache     = &cachedValue{k: "instance/attributes/cluster-name"}
+	clusterLocationCache = &cachedValue{k: "instance/attributes/cluster-location"}
+	nodeZoneCache        = &cachedValue{k: "instance/zone"}
+)
+
+type cachedValue struct {
+	k  string
+	mu sync.Mutex
+	v  string
+}
+
+func (c *cachedValue) get(mc *metadataClient) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.v != "" {
+		return c.v, nil
+	}
+	v, err := mc.get(c.k)
+	if err != nil {
+		return "", err
+	}
+	c.v = v
+	return c.v, nil
+}
+
+func (c *cachedValue) clearForTesting() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.v = ""
+}
+
+var defaultMetadataClient = &metadataClient{hc: &http.Client{Timeout: 5 * time.Second}}
+
+// getProjectNumber returns the project number of the GCP project.
+func (mc *metadataClient) getProjectNumber() (int64, error) {
+	pn, err := projectNumberCache.get(mc)
+	if err != nil {
+		return 0, fmt.Errorf("failed to determine project id: could not discover project number: %w", err)
+	}
+	return strconv.ParseInt(string(pn), 10, 64)
+}
+
+// getVMName returns the name of the GCE VM instance.
+func (mc *metadataClient) getVMName() (string, error) {
+	return vmNameCache.get(mc)
+}
+
+// getClusterName returns the name of the GKE cluster. If the generator is not
+// running on GKE, it returns an error.
+func (mc *metadataClient) getClusterName() (string, error) {
+	return clusterNameCache.get(mc)
+}
+
+// getClusterLocation returns the location of the GKE cluster. If the generator
+// is not running on GKE, it returns an error.
+func (mc *metadataClient) getClusterLocation() (string, error) {
+	return clusterLocationCache.get(mc)
+}
+
+// isIPv6Capable returns true if the GCE VM instance has an IPv6 address.
+// Also returns false if there is an error.
+func (mc *metadataClient) isIPv6Capable() bool {
+	_, err := ipV6Cache.get(mc)
 	return err == nil
 }
 
-func getFromMetadata(urlStr string) ([]byte, error) {
-	parsedUrl, err := url.Parse(urlStr)
+// getNodeZone returns the zone of the GCE VM instance.
+func (mc *metadataClient) getNodeZone() (string, error) {
+	qualifiedZone, err := nodeZoneCache.get(mc)
 	if err != nil {
-		return nil, err
+		return "", fmt.Errorf("failed to determine zone: could not discover instance zone: %w", err)
 	}
-	client := &http.Client{
-		Timeout: 5 * time.Second,
+	i := bytes.LastIndexByte([]byte(qualifiedZone), '/')
+	if i == -1 {
+		return "", fmt.Errorf("failed to determine zone: could not parse zone from metadata server: %s", qualifiedZone)
 	}
-	req := &http.Request{
-		Method: "GET",
-		URL:    parsedUrl,
-		Header: http.Header{
-			"Metadata-Flavor": {"Google"},
-		},
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed communicating with metadata server: %w", err)
-	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("failed reading from metadata server: %w", err)
-	}
-	if code := resp.StatusCode; code < 200 || code > 299 {
-		return nil, fmt.Errorf("metadata server returned status code %d for url %q", code, parsedUrl)
-	}
-	return body, nil
+	return string(qualifiedZone[i+1:]), nil
 }
 
 type config struct {

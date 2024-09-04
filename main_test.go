@@ -53,7 +53,7 @@ func TestValidate(t *testing.T) {
 				gcpProjectNumber: 123456789012345,
 				vpcNetworkName:   "thedefault",
 				ip:               "10.9.8.7",
-				zone:             "uscentral-5",
+				vmZone:           "uscentral-5",
 				metadataLabels:   map[string]string{"k1": "v1", "k2": "v2"},
 				configMesh:       strings.Repeat("a", 65),
 			},
@@ -66,7 +66,7 @@ func TestValidate(t *testing.T) {
 				gcpProjectNumber: 123456789012345,
 				vpcNetworkName:   "thedefault",
 				ip:               "10.9.8.7",
-				zone:             "uscentral-5",
+				vmZone:           "uscentral-5",
 				metadataLabels:   map[string]string{"k1": "v1", "k2": "v2"},
 				configMesh:       "4foo",
 			},
@@ -79,7 +79,7 @@ func TestValidate(t *testing.T) {
 				gcpProjectNumber: 123456789012345,
 				vpcNetworkName:   "thedefault",
 				ip:               "10.9.8.7",
-				zone:             "uscentral-5",
+				vmZone:           "uscentral-5",
 				metadataLabels:   map[string]string{"k1": "v1", "k2": "v2"},
 				configMesh:       "h*x8",
 			},
@@ -110,7 +110,7 @@ func TestGenerate(t *testing.T) {
 				gcpProjectNumber: 123456789012345,
 				vpcNetworkName:   "thedefault",
 				ip:               "10.9.8.7",
-				zone:             "uscentral-5",
+				vmZone:           "uscentral-5",
 				metadataLabels:   map[string]string{"k1": "v1", "k2": "v2"},
 				gitCommitHash:    "7202b7c611ebd6d382b7b0240f50e9824200bffd",
 			},
@@ -181,7 +181,7 @@ func TestGenerate(t *testing.T) {
 				gcpProjectNumber: 123456789012345,
 				vpcNetworkName:   "thedefault",
 				ip:               "10.9.8.7",
-				zone:             "uscentral-5",
+				vmZone:           "uscentral-5",
 				secretsDir:       "/secrets/dir/",
 				gitCommitHash:    "7202b7c611ebd6d382b7b0240f50e9824200bffd",
 			},
@@ -250,7 +250,7 @@ func TestGenerate(t *testing.T) {
 				gcpProjectNumber: 123456789012345,
 				vpcNetworkName:   "thedefault",
 				ip:               "10.9.8.7",
-				zone:             "uscentral-5",
+				vmZone:           "uscentral-5",
 				deploymentInfo: map[string]string{
 					"GCP-ZONE":      "uscentral-5",
 					"GKE-CLUSTER":   "test-gke-cluster",
@@ -334,7 +334,7 @@ func TestGenerate(t *testing.T) {
 				gcpProjectNumber: 123456789012345,
 				vpcNetworkName:   "thedefault",
 				ip:               "10.9.8.7",
-				zone:             "uscentral-5",
+				vmZone:           "uscentral-5",
 				deploymentInfo: map[string]string{
 					"GCP-ZONE":      "uscentral-5",
 					"GKE-CLUSTER":   "test-gke-cluster",
@@ -419,7 +419,7 @@ func TestGenerate(t *testing.T) {
 				gcpProjectNumber:       123456789012345,
 				vpcNetworkName:         "thedefault",
 				ip:                     "10.9.8.7",
-				zone:                   "uscentral-5",
+				vmZone:                 "uscentral-5",
 				ignoreResourceDeletion: true,
 				gitCommitHash:          "7202b7c611ebd6d382b7b0240f50e9824200bffd",
 			},
@@ -489,7 +489,7 @@ func TestGenerate(t *testing.T) {
 				gcpProjectNumber:      123456789012345,
 				vpcNetworkName:        "thedefault",
 				ip:                    "10.9.8.7",
-				zone:                  "uscentral-5",
+				vmZone:                "uscentral-5",
 				ipv6Capable:           true,
 				includeXDSTPNameInLDS: true,
 				gitCommitHash:         "7202b7c611ebd6d382b7b0240f50e9824200bffd",
@@ -582,12 +582,12 @@ func TestGetZone(t *testing.T) {
 	http.HandleFunc("metadata.google.internal/computeMetadata/v1/instance/zone",
 		func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Metadata-Flavor") != "Google" {
-				http.Error(w, "Missing Metadata-Flavor", 403)
+				http.Error(w, "Missing Metadata-Flavor", http.StatusForbidden)
 				return
 			}
 			w.Write([]byte("projects/123456789012345/zones/us-central5-c"))
 		})
-	got, err := getZone()
+	got, err := defaultMetadataClient.getNodeZone()
 	if err != nil {
 		t.Fatalf("want no error, got :%v", err)
 	}
@@ -604,12 +604,12 @@ func TestGetProjectId(t *testing.T) {
 	http.HandleFunc("metadata.google.internal/computeMetadata/v1/project/numeric-project-id",
 		func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Metadata-Flavor") != "Google" {
-				http.Error(w, "Missing Metadata-Flavor", 403)
+				http.Error(w, "Missing Metadata-Flavor", http.StatusForbidden)
 				return
 			}
 			w.Write([]byte("123456789012345"))
 		})
-	got, err := getProjectId()
+	got, err := defaultMetadataClient.getProjectNumber()
 	if err != nil {
 		t.Fatalf("want no error, got :%v", err)
 	}
@@ -626,12 +626,12 @@ func TestGetClusterName(t *testing.T) {
 	http.HandleFunc("metadata.google.internal/computeMetadata/v1/instance/attributes/cluster-name",
 		func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Metadata-Flavor") != "Google" {
-				http.Error(w, "Missing Metadata-Flavor", 403)
+				http.Error(w, "Missing Metadata-Flavor", http.StatusForbidden)
 				return
 			}
 			w.Write([]byte("test-cluster"))
 		})
-	if got, _ := getClusterName(); got != want {
+	if got, _ := defaultMetadataClient.getClusterName(); got != want {
 		t.Fatalf("getClusterName() = %s, want: %s", got, want)
 	}
 }
@@ -676,13 +676,13 @@ func TestGetClusterLocality(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.desc, func(t *testing.T) {
+			defer clusterLocationCache.clearForTesting()
 			mux := http.NewServeMux()
 			mux.HandleFunc("metadata.google.internal/computeMetadata/v1/instance/attributes/cluster-location", tt.handler)
 			server := httptest.NewServer(mux)
 			defer server.Close()
 			overrideHTTP(server)
-
-			got, err := getClusterLocality()
+			got, err := defaultMetadataClient.getClusterLocation()
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("getClusterLocality() returned error: %s wantErr: %v", err, tt.wantErr)
 			}
@@ -701,12 +701,16 @@ func TestGetVMName(t *testing.T) {
 	http.HandleFunc("metadata.google.internal/computeMetadata/v1/instance/name",
 		func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Metadata-Flavor") != "Google" {
-				http.Error(w, "Missing Metadata-Flavor", 403)
+				http.Error(w, "Missing Metadata-Flavor", http.StatusForbidden)
 				return
 			}
 			w.Write([]byte("test-vm"))
 		})
-	if got := getVMName(); got != want {
+	got, err := defaultMetadataClient.getVMName()
+	if err != nil {
+		t.Fatalf("getVMName() return an expected error: %v", err)
+	}
+	if got != want {
 		t.Fatalf("getVMName() = %s, want: %s", got, want)
 	}
 }
@@ -721,7 +725,7 @@ func TestCheckIPv6Capable(t *testing.T) {
 			desc: "v6 enabled",
 			httpHandler: func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Metadata-Flavor") != "Google" {
-					http.Error(w, "Missing Metadata-Flavor", 403)
+					http.Error(w, "Missing Metadata-Flavor", http.StatusForbidden)
 					return
 				}
 				w.Write([]byte("6970:7636:2061:6464:7265:7373:2062:6162"))
@@ -731,7 +735,7 @@ func TestCheckIPv6Capable(t *testing.T) {
 		{
 			desc: "v6 not enabled",
 			httpHandler: func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "Not Found", 404)
+				http.Error(w, "Not Found", http.StatusNotFound)
 				return
 			},
 			wantOutput: false,
@@ -740,18 +744,45 @@ func TestCheckIPv6Capable(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
+			defer ipV6Cache.clearForTesting()
 			mux := http.NewServeMux()
 			mux.HandleFunc("metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ipv6s", test.httpHandler)
 			server := httptest.NewServer(mux)
 			defer server.Close()
 			overrideHTTP(server)
-			if got := isIPv6Capable(); got != test.wantOutput {
+			if got := defaultMetadataClient.isIPv6Capable(); got != test.wantOutput {
 				t.Fatalf("isIPv6Capable() = %t, want: %t", got, test.wantOutput)
 			}
-
 		})
 	}
 
+}
+
+func TestCaching(t *testing.T) {
+	server := httptest.NewServer(nil)
+	defer server.Close()
+	overrideHTTP(server)
+	want := "test-cluster"
+	reqCounter := 0
+	http.HandleFunc("metadata.google.internal/computeMetadata/v1/instance/attributes/cluster-name",
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Metadata-Flavor") != "Google" {
+				http.Error(w, "Missing Metadata-Flavor", http.StatusForbidden)
+				return
+			}
+			reqCounter++
+			w.Write([]byte("test-cluster"))
+		},
+	)
+
+	for i := 0; i < 10; i++ {
+		if got, _ := defaultMetadataClient.getClusterName(); got != want {
+			t.Fatalf("getClusterName() = %s, want: %s", got, want)
+		}
+		if reqCounter != 1 {
+			t.Fatalf("getClusterName() called %d times, want: 1", reqCounter)
+		}
+	}
 }
 
 func overrideHTTP(s *httptest.Server) {
